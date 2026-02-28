@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3002;
 
-const ONTOLOGY_FILE = process.env.ONTOLOGY_FILE || path.join(__dirname, '../data/ontology.jsonl');
+const ONTOLOGY_FILE = process.env.ONTOLOGY_FILE || '/data/workspace/memory/ontology/graph.jsonl';
 const MESSAGES_FILE = process.env.MESSAGES_FILE || path.join(__dirname, '../data/messages.json');
 
 // Ensure data directory
