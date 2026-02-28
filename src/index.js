@@ -1,33 +1,21 @@
 import express from 'express';
 import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import Redis from 'ioredis';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __dirname = '/data/workspace';
 const PORT = process.env.PORT || 3002;
 
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const ONTOLOGY_FILE = process.env.ONTOLOGY_FILE || '/data/workspace/memory/ontology/graph.jsonl';
-const MESSAGES_FILE = process.env.MESSAGES_FILE || path.join(__dirname, '../data/messages.json');
 
-// Ensure data directory
-const dataDir = path.dirname(ONTOLOGY_FILE);
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
+const redis = new Redis(REDIS_URL);
 
-// Initialize files
-if (!fs.existsSync(ONTOLOGY_FILE)) {
-  fs.writeFileSync(ONTOLOGY_FILE, '');
-}
-if (!fs.existsSync(MESSAGES_FILE)) {
-  fs.writeFileSync(MESSAGES_FILE, JSON.stringify([]));
-}
-
-// Helper: Read all ontology entries
+// Helper: Read ontology
 function readOntology() {
   try {
+    const fs = require('fs');
+    if (!fs.existsSync(ONTOLOGY_FILE)) return [];
     const content = fs.readFileSync(ONTOLOGY_FILE, 'utf8');
     if (!content.trim()) return [];
     return content.trim().split('\n').map(line => JSON.parse(line));
@@ -36,25 +24,13 @@ function readOntology() {
   }
 }
 
-// Helper: Write ontology entry (append)
+// Helper: Write ontology entry
 function writeOntologyEntry(entry) {
+  const fs = require('fs');
+  const dir = require('path').dirname(ONTOLOGY_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(ONTOLOGY_FILE)) fs.writeFileSync(ONTOLOGY_FILE, '');
   fs.appendFileSync(ONTOLOGY_FILE, JSON.stringify(entry) + '\n');
-}
-
-// Helper: Read messages
-function readMessages() {
-  try {
-    return JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8'));
-  } catch (e) {
-    return [];
-  }
-}
-
-// Helper: Write message
-function writeMessage(msg) {
-  const messages = readMessages();
-  messages.push(msg);
-  fs.writeFileSync(MESSAGES_FILE, JSON.stringify(messages, null, 2));
 }
 
 const app = express();
@@ -63,7 +39,6 @@ app.use(express.json());
 
 // ============ ONTOLOGY ROUTES ============
 
-// GET /ontology - Get all entities and relations
 app.get('/ontology', (req, res) => {
   const entries = readOntology();
   const entities = entries.filter(e => e.entity).map(e => e.entity);
@@ -71,14 +46,11 @@ app.get('/ontology', (req, res) => {
   res.json({ entities, relations });
 });
 
-// POST /ontology/entity - Create entity
 app.post('/ontology/entity', (req, res) => {
   const { type, properties } = req.body;
-  
   if (!type || !properties) {
     return res.status(400).json({ error: 'type and properties required' });
   }
-
   const entity = {
     id: `${type.toLowerCase()}_${uuidv4().slice(0, 8)}`,
     type,
@@ -86,165 +58,57 @@ app.post('/ontology/entity', (req, res) => {
     created: new Date().toISOString(),
     updated: new Date().toISOString()
   };
-
-  const entry = {
-    op: 'create',
-    entity,
-    timestamp: new Date().toISOString()
-  };
-
-  writeOntologyEntry(entry);
+  writeOntologyEntry({ op: 'create', entity });
   res.status(201).json(entity);
 });
 
-// GET /ontology/entity/:id - Get entity by ID
-app.get('/ontology/entity/:id', (req, res) => {
-  const entries = readOntology();
-  const entity = entries.find(e => e.entity?.id === req.params.id);
-  
-  if (!entity) {
-    return res.status(404).json({ error: 'Entity not found' });
-  }
-  
-  res.json(entity.entity);
-});
-
-// PUT /ontology/entity/:id - Update entity
 app.put('/ontology/entity/:id', (req, res) => {
   const { properties } = req.body;
   const entries = readOntology();
   const idx = entries.findIndex(e => e.entity?.id === req.params.id);
-  
-  if (idx === -1) {
-    return res.status(404).json({ error: 'Entity not found' });
-  }
-
-  const updated = {
-    ...entries[idx].entity,
-    properties: { ...entries[idx].entity.properties, ...properties },
-    updated: new Date().toISOString()
-  };
-
-  const entry = {
-    op: 'update',
-    entity: updated,
-    timestamp: new Date().toISOString()
-  };
-
-  writeOntologyEntry(entry);
+  if (idx === -1) return res.status(404).json({ error: 'Entity not found' });
+  const updated = { ...entries[idx].entity, properties: { ...entries[idx].entity.properties, ...properties }, updated: new Date().toISOString() };
+  writeOntologyEntry({ op: 'update', entity: updated });
   res.json(updated);
 });
 
-// DELETE /ontology/entity/:id - Delete entity
-app.delete('/ontology/entity/:id', (req, res) => {
-  const entries = readOntology();
-  const exists = entries.find(e => e.entity?.id === req.params.id);
-  
-  if (!exists) {
-    return res.status(404).json({ error: 'Entity not found' });
-  }
-
-  const entry = {
-    op: 'delete',
-    entityId: req.params.id,
-    timestamp: new Date().toISOString()
-  };
-
-  writeOntologyEntry(entry);
-  res.json({ success: true });
-});
-
-// POST /ontology/relation - Create relation
 app.post('/ontology/relation', (req, res) => {
-  const { from, rel, to, properties } = req.body;
-  
-  if (!from || !rel || !to) {
-    return res.status(400).json({ error: 'from, rel, and to required' });
-  }
-
-  const entry = {
-    op: 'relate',
-    from,
-    rel,
-    to,
-    properties: properties || {},
-    timestamp: new Date().toISOString()
-  };
-
-  writeOntologyEntry(entry);
-  res.status(201).json(entry);
+  const { from, rel, to } = req.body;
+  if (!from || !rel || !to) return res.status(400).json({ error: 'from, rel, to required' });
+  writeOntologyEntry({ op: 'relate', from, rel, to });
+  res.status(201).json({ from, rel, to });
 });
 
-// GET /ontology/related/:id - Get related entities
-app.get('/ontology/related/:id', (req, res) => {
-  const { rel } = req.query;
-  const entries = readOntology();
-  
-  let relations = entries.filter(e => 
-    e.from === req.params.id || e.to === req.params.id
-  );
+// ============ CHAT ROUTES (Redis) ============
 
-  if (rel) {
-    relations = relations.filter(e => e.rel === rel);
-  }
+const CHAT_MESSAGES_KEY = 'jarvis:chat:messages';
 
-  res.json(relations);
+app.get('/messages', async (req, res) => {
+  const lastTimestamp = parseInt(req.query.last || '0');
+  const messages = await redis.lrange(CHAT_MESSAGES_KEY, 0, -1);
+  const parsed = messages.map(m => JSON.parse(m)).filter(m => m.timestamp > lastTimestamp);
+  res.json({ messages: parsed, serverTime: Date.now() });
 });
 
-// POST /ontology/query - Query entities
-app.post('/ontology/query', (req, res) => {
-  const { type, where } = req.body;
-  const entries = readOntology();
-  
-  let entities = entries.filter(e => e.entity);
-  
-  if (type) {
-    entities = entities.filter(e => e.entity.type === type);
-  }
-  
-  if (where) {
-    entities = entities.filter(e => {
-      return Object.entries(where).every(([key, value]) => 
-        e.entity.properties[key] === value
-      );
-    });
-  }
-  
-  res.json(entities.map(e => e.entity));
-});
-
-// ============ CHAT ROUTES ============
-
-// GET /messages - Get chat messages
-app.get('/messages', (req, res) => {
-  const messages = readMessages();
-  res.json({ messages, serverTime: Date.now() });
-});
-
-// POST /messages - Send message
-app.post('/messages', (req, res) => {
+app.post('/messages', async (req, res) => {
   const { message, sender } = req.body;
+  if (!message) return res.status(400).json({ error: 'message required' });
   
-  if (!message) {
-    return res.status(400).json({ error: 'message required' });
-  }
-
   const msg = {
     sender: sender || 'guest',
     message,
     timestamp: Date.now()
   };
-
-  writeMessage(msg);
+  
+  await redis.rpush(CHAT_MESSAGES_KEY, JSON.stringify(msg));
   res.status(201).json(msg);
 });
 
-// GET /messages/poll - Poll for new messages
-app.get('/messages/poll', (req, res) => {
+app.get('/messages/poll', async (req, res) => {
   const lastTimestamp = parseInt(req.query.last || '0');
-  const messages = readMessages();
-  const newMessages = messages.filter(m => m.timestamp > lastTimestamp);
-  res.json({ messages: newMessages, serverTime: Date.now() });
+  const messages = await redis.lrange(CHAT_MESSAGES_KEY, 0, -1);
+  const parsed = messages.map(m => JSON.parse(m)).filter(m => m.timestamp > lastTimestamp);
+  res.json({ messages: parsed, serverTime: Date.now() });
 });
 
 // ============ HEALTH ============
